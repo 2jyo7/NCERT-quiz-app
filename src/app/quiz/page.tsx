@@ -42,7 +42,7 @@ function QuizContent() {
         const res = await fetch('/api/generate-quiz', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ className, subject, topic, level, language, count: 3 }),
+          body: JSON.stringify({ className, subject, topic, level, language, count: 7 }),
         });
         const data = await res.json();
         if (data.questions) {
