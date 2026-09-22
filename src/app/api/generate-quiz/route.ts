@@ -8,14 +8,13 @@ export async function POST(req: Request) {
       topic, 
       level, 
       count = 7, 
-      language = 'English' // 'English' | 'Hindi'
+      language = 'English' 
     } = await req.json();
 
     if (!process.env.GROQ_API_KEY) {
       return NextResponse.json({ error: "GROQ_API_KEY missing" }, { status: 500 });
     }
 
-    // Dynamic seed and timestamp force the model to generate a brand new set of questions every call
     const randomSeed = Math.floor(Math.random() * 1000000);
     const timestamp = new Date().toISOString();
 
@@ -28,8 +27,8 @@ Target Language: ${language}. (Ensure all generated scenarios, questions, option
 
 Subject-Specific Guidance for Arts/Humanities (Classes 11-12):
 - History: Treat history like a puzzle or mystery. Focus on 'Why people acted the way they did', trade routes, decision-making, or cultural impact—NEVER simple date/year recall.
-- Geography: Connect landforms, weather, or human activity to practical everyday observations (e.g., why a city grew near a river, how monsoon winds affect local farming).
-- English & Hindi Literature: Focus on underlying emotions, moral dilemmas, character motivations, and literary themes rather than strict grammar definitions or rote summary memorization.
+- Geography: Connect landforms, weather, or human activity to practical everyday observations.
+- English & Hindi Literature: Focus on underlying emotions, moral dilemmas, character motivations, and literary themes.
 
 CRITICAL INSTRUCTIONS:
 1. You MUST generate EXACTLY ${count} unique questions.
@@ -41,68 +40,88 @@ Output a single JSON object containing a "questions" key with an array of EXACTL
   "questions": [
     {
       "id": 1,
-      "scenario": "A short, engaging hook, historical dilemma, or literary perspective in ${language}.",
+      "scenario": "A short, engaging hook in ${language}.",
       "question": "The core conceptual question in ${language}.",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correctIndex": 0,
-      "curiosityHint": "A gentle nudge asking the student to think from the character's, historian's, or observer's point of view in ${language}.",
-      "realWorldAnalogy": "Connecting the concept to modern life, human nature, or daily observation in ${language}."
+      "curiosityHint": "A gentle nudge asking the student to think from an observer's point of view in ${language}.",
+      "realWorldAnalogy": "Connecting the concept to modern life in ${language}."
     }
   ]
 }
 `;
 
-    // Candidate list of active Groq model IDs to prevent 'model not found' crashes
+    // Active production models on Groq
     const candidateModels = [
       'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'mixtral-8x7b-32768'
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
+      'llama-3.1-8b-instant'
     ];
 
-    let response;
-    let data;
+    let extractedQuestions: any[] | null = null;
+    let lastError: string | null = null;
 
     for (const modelName of candidateModels) {
-      response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: modelName,
-          messages: [{ role: 'system', content: systemPrompt }],
-          response_format: { type: 'json_object' },
-          temperature: 0.85,
-          top_p: 0.95,
-          max_tokens: 4000,
-        }),
-      });
+      try {
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: modelName,
+            messages: [{ role: 'system', content: systemPrompt }],
+            response_format: { type: 'json_object' },
+            temperature: 0.85,
+            top_p: 0.95,
+            max_tokens: 4000,
+          }),
+        });
 
-      data = await response.json();
+        const data = await response.json();
 
-      if (response.ok && data?.choices?.[0]) {
-        break;
+        if (!response.ok || !data?.choices?.[0]?.message?.content) {
+          lastError = data?.error?.message || `Model ${modelName} returned HTTP ${response.status}`;
+          console.warn(`Groq model ${modelName} failed: ${lastError}`);
+          continue;
+        }
+
+        const rawContent = data.choices[0].message.content;
+        const parsed = JSON.parse(rawContent);
+
+        // Safe array extraction logic
+        let parsedArray: any[] | null = null;
+        if (Array.isArray(parsed)) {
+          parsedArray = parsed;
+        } else if (Array.isArray(parsed.questions)) {
+          parsedArray = parsed.questions;
+        } else {
+          // Find first array property in object dynamically
+          const foundArray = Object.values(parsed).find((val) => Array.isArray(val));
+          if (foundArray && Array.isArray(foundArray)) {
+            parsedArray = foundArray;
+          }
+        }
+
+        if (parsedArray && parsedArray.length > 0) {
+          extractedQuestions = parsedArray;
+          break; // Success! Exit loop
+        }
+      } catch (err) {
+        console.warn(`Parsing or fetch error with model ${modelName}:`, err);
       }
-
-      console.warn(`Model ${modelName} failed, trying fallback...`);
     }
 
-    if (!response?.ok || !data?.choices?.[0]) {
-      console.error('Groq API Error Response:', data);
+    if (!extractedQuestions) {
       return NextResponse.json(
-        { error: data?.error?.message || 'Failed to receive a valid response from Groq API.' },
-        { status: response?.status || 500 }
+        { error: lastError || 'Failed to generate questions across all candidate models.' },
+        { status: 500 }
       );
     }
 
-    const content = data.choices[0].message.content;
-    const parsedData = JSON.parse(content);
-    const questions = Array.isArray(parsedData)
-      ? parsedData
-      : parsedData.questions || Object.values(parsedData)[0];
-
-    return NextResponse.json({ questions: questions.slice(0, count) });
+    return NextResponse.json({ questions: extractedQuestions.slice(0, count) });
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
     console.error('Quiz Generation Error:', errorMessage);
